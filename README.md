@@ -1,3 +1,5 @@
+WARNING: This is a pure Zero-Knowledge system. There is no back-door, no recovery key, and no "Forgot Password" button. If you lose your master key, your data is gone forever. Don't text me asking for ways to recover your passwords. You can cry about it.
+
 # chpwd
 
 A minimal and highly secure CLI password manager for Linux. 

@@ -24,11 +24,13 @@ import (
 const vaultFile = "vault.db"
 
 const (
-	magicBytes  = "CHPD"
-	fileVersion = 1
-	keyLength   = 32
-	saltLength  = 16
-	maxMemoryMB = 4096
+	magicBytes    = "CHPD"
+	fileVersion   = 1
+	keyLength     = 32
+	saltLength    = 16
+	maxMemoryMB   = 4096
+	maxIterations = 100
+	maxThreads    = 64
 )
 
 type CryptoParams struct {
@@ -98,8 +100,8 @@ func initCryptoParams(scanner *bufio.Scanner) (CryptoParams, error) {
 	fmt.Println()
 	
 	memMB := readParam(scanner, "Allocated memory in MB (Min: 8, Max: 4096, Recommended: 256)", 256, 8, maxMemoryMB)
-	iterations := readParam(scanner, "Iterations (Min: 1, Max: 1000, Recommended: 4)", 4, 1, 1000)
-	threads := readParam(scanner, "Parallel threads (Min: 1, Max: 64, Recommended: 4)", 4, 1, 64)
+	iterations := readParam(scanner, "Iterations (Min: 1, Max: 100, Recommended: 4)", 4, 1, maxIterations)
+	threads := readParam(scanner, "Parallel threads (Min: 1, Max: 64, Recommended: 4)", 4, 1, maxThreads)
 
 	salt := make([]byte, saltLength)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
@@ -142,6 +144,12 @@ func readCryptoParams() (CryptoParams, error) {
 
 	if mem > maxMemoryMB*1024 {
 		return CryptoParams{}, fmt.Errorf("SECURITY: File requests %d MB RAM. Limit exceeded (max %d MB)", mem/1024, maxMemoryMB)
+	}
+	if iter > maxIterations {
+		return CryptoParams{}, fmt.Errorf("SECURITY: File requests %d iterations. Limit exceeded (max %d)", iter, maxIterations)
+	}
+	if uint32(threads) > maxThreads {
+		return CryptoParams{}, fmt.Errorf("SECURITY: File requests %d threads. Limit exceeded (max %d)", threads, maxThreads)
 	}
 
 	return CryptoParams{
@@ -341,10 +349,12 @@ func main() {
 
 	if _, err = os.Stat(vaultFile); os.IsNotExist(err) {
 		fmt.Println("========================================================================")
-		fmt.Println("CRITICAL WARNING:")
-		fmt.Println("The password is NEVER saved to disk or OS keychains.")
-		fmt.Println("If you lose the password, your data is GONE FOREVER.")
-		fmt.Println("You CANNOT reset, recover, or change the master password.")
+		fmt.Println("⚠️  CRITICAL WARNING: ZERO-KNOWLEDGE CRYPTO VAULT")
+		fmt.Println("- CRYPTOGRAPHY: Argon2id key derivation + AES-256-GCM hardware encryption.")
+		fmt.Println("- MEMORY SAFETY: Master password is wiped from RAM instantly after boot.")
+		fmt.Println("- STORAGE SAFETY: The password is NEVER saved to disk or OS keychains.")
+		fmt.Println("- IRREVERSIBLE: If you lose the password, your data is GONE FOREVER.")
+		fmt.Println("- PERMANENT: You CANNOT reset, recover, or change the master password.")
 		fmt.Println("========================================================================")
 		fmt.Println()
 
@@ -486,7 +496,10 @@ func main() {
 			mu.Lock()
 			pwdBytes, exists := vault[service]
 			if exists {
-				fmt.Printf("%s: %s\n", service, pwdBytes)
+				fmt.Printf("%s: %s\n", service, string(pwdBytes))
+				fmt.Print("   [Press ENTER to hide password]")
+				scanner.Scan()
+				fmt.Print("\r\033[A\033[2K\033[A\033[2K")
 			} else {
 				fmt.Println("Error: Service not found.")
 			}

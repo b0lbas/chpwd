@@ -349,12 +349,10 @@ func main() {
 
 	if _, err = os.Stat(vaultFile); os.IsNotExist(err) {
 		fmt.Println("========================================================================")
-		fmt.Println("⚠️  CRITICAL WARNING: ZERO-KNOWLEDGE CRYPTO VAULT")
-		fmt.Println("- CRYPTOGRAPHY: Argon2id key derivation + AES-256-GCM hardware encryption.")
-		fmt.Println("- MEMORY SAFETY: Master password is wiped from RAM instantly after boot.")
-		fmt.Println("- STORAGE SAFETY: The password is NEVER saved to disk or OS keychains.")
-		fmt.Println("- IRREVERSIBLE: If you lose the password, your data is GONE FOREVER.")
-		fmt.Println("- PERMANENT: You CANNOT reset, recover, or change the master password.")
+		fmt.Println("WARNING:")
+		fmt.Println("The password is NEVER saved to disk or OS keychains.")
+		fmt.Println("If you lose the password, your data is GONE FOREVER.")
+		fmt.Println("You CANNOT reset, recover, or change the master password.")
 		fmt.Println("========================================================================")
 		fmt.Println()
 

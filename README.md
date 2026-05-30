@@ -41,9 +41,9 @@ chpwd
 Enter your master password to unlock the database. Once inside the internal shell, use the following commands:
 
 * `help` — Show available commands.
-* `add <service> <password>` — Save a new password.
+* `add <service>` — Save a new password.
 * `get <service>` — Retrieve a password.
-* `mod <service> <password>` — Update an existing password.
+* `mod <service>` — Update an existing password.
 * `del <service>` — Delete a password from the vault.
 * `exit` — Securely lock the vault and quit.
 

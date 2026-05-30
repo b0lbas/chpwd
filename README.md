@@ -11,7 +11,7 @@ If you exit the application immediately after configuring the Master Password wi
 
 # chpwd
 
-A minimal and highly secure CLI password manager for Linux. 
+A minimal and highly secure CLI password manager. 
 
 ## Features
 * **Strong Crypto:** Uses authenticated encryption (**AES-256-GCM**) for data and **Argon2id** for memory-hard master password key derivation.

@@ -1,4 +1,12 @@
-WARNING: This is a pure Zero-Knowledge system. There is no back-door, no recovery key, and no "Forgot Password" button. If you lose your master key, your data is gone forever. Don't text me asking for ways to recover your passwords. Cry about it.
+WARNING: This is a pure Zero-Knowledge system. There is no back-door, no recovery key, and no "Forgot Password" button. If you lose your master key, your data is gone forever.
+
+### ⚠️ Important Note on First Launch
+
+When you run `chpwd` for the first time, you will go through the Zero-Knowledge disclaimer and the hardware tuning wizard. 
+
+Please note that **the database file (`vault.db`) is physically created only after you add your very first password** using the `add <service>` command. 
+
+If you exit the application immediately after configuring the Master Password without adding any entries, **your settings will not be saved**, and the next launch will trigger the setup wizard and disclaimer again.
 
 # chpwd
 

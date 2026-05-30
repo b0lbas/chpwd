@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,8 +21,6 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/term"
 )
-
-const vaultFile = "vault.db"
 
 const (
 	magicBytes    = "CHPD"
@@ -116,8 +115,8 @@ func initCryptoParams(scanner *bufio.Scanner) (CryptoParams, error) {
 	}, nil
 }
 
-func readCryptoParams() (CryptoParams, error) {
-	file, err := os.Open(vaultFile)
+func readCryptoParams(vaultPath string) (CryptoParams, error) {
+	file, err := os.Open(vaultPath)
 	if err != nil {
 		return CryptoParams{}, err
 	}
@@ -233,13 +232,6 @@ func encrypt(plaintext []byte, key []byte) ([]byte, error) {
 }
 
 func decrypt(encryptedPayload []byte, key []byte) ([]byte, error) {
-	if len(encryptedPayload) < 12 {
-		return nil, fmt.Errorf("invalid encrypted payload size")
-	}
-
-	nonce := encryptedPayload[:12]
-	ciphertext := encryptedPayload[12:]
-
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -250,15 +242,23 @@ func decrypt(encryptedPayload []byte, key []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	nonceSize := aesGCM.NonceSize()
+	if len(encryptedPayload) < nonceSize {
+		return nil, fmt.Errorf("invalid encrypted payload size")
+	}
+
+	nonce := encryptedPayload[:nonceSize]
+	ciphertext := encryptedPayload[nonceSize:]
+
 	return aesGCM.Open(nil, nonce, ciphertext, nil)
 }
 
-func loadVault(sessionKey []byte, currentParams CryptoParams) (Vault, error) {
-	if _, err := os.Stat(vaultFile); os.IsNotExist(err) {
+func loadVault(sessionKey []byte, currentParams CryptoParams, vaultPath string) (Vault, error) {
+	if _, err := os.Stat(vaultPath); os.IsNotExist(err) {
 		return make(Vault), nil
 	}
 
-	fileData, err := os.ReadFile(vaultFile)
+	fileData, err := os.ReadFile(vaultPath)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +288,7 @@ func loadVault(sessionKey []byte, currentParams CryptoParams) (Vault, error) {
 	return decodeVault(decryptedData[9:])
 }
 
-func saveVault(vault Vault, sessionKey []byte, params CryptoParams) error {
+func saveVault(vault Vault, sessionKey []byte, params CryptoParams, vaultPath string) error {
 	vaultPlaintext := encodeVault(vault)
 
 	validationBuf := make([]byte, 9)
@@ -319,16 +319,33 @@ func saveVault(vault Vault, sessionKey []byte, params CryptoParams) error {
 	buf.Write(params.Salt)
 	buf.Write(encryptedPayload)
 
-	tmpFile := vaultFile + ".tmp"
+	dir := filepath.Dir(vaultPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+
+	tmpFile := vaultPath + ".tmp"
 	if err := os.WriteFile(tmpFile, buf.Bytes(), 0600); err != nil {
 		return err
 	}
 
-	if _, err := os.Stat(vaultFile); err == nil {
-		_ = os.Remove(vaultFile)
+	if _, err := os.Stat(vaultPath); err == nil {
+		_ = os.Remove(vaultPath)
 	}
 
-	return os.Rename(tmpFile, vaultFile)
+	return os.Rename(tmpFile, vaultPath)
+}
+
+func getVaultPath() (string, error) {
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dataHome = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(dataHome, "chpwd", "vault.db"), nil
 }
 
 func printHelp() {
@@ -337,22 +354,185 @@ func printHelp() {
 	fmt.Println("  get <service>  - Read a password")
 	fmt.Println("  mod <service>  - Modify an existing password")
 	fmt.Println("  del <service>  - Delete a password")
+	fmt.Println("  list           - List all stored services")
 	fmt.Println("  help           - Show this menu")
 	fmt.Println("  exit           - Close the application")
 }
 
+func runREPL(vault Vault, sessionKey []byte, params CryptoParams, vaultPath string, scanner *bufio.Scanner) {
+	fmt.Println("Vault unlocked. Type 'help' for commands.")
+
+	for {
+		fmt.Print("chpwd> ")
+		if !scanner.Scan() {
+			break
+		}
+
+		line := scanner.Text()
+		args := strings.Fields(line)
+		if len(args) == 0 {
+			continue
+		}
+
+		switch args[0] {
+		case "help":
+			printHelp()
+
+		case "list":
+			mu.Lock()
+			if len(vault) == 0 {
+				fmt.Println("Vault is empty.")
+			} else {
+				fmt.Println("Stored services:")
+				for service := range vault {
+					fmt.Printf("  - %s\n", service)
+				}
+			}
+			mu.Unlock()
+
+		case "add":
+			if len(args) < 2 {
+				fmt.Println("Usage: add <service>")
+				continue
+			}
+			service := args[1] 
+			
+			mu.Lock()
+			_, exists := vault[service]
+			mu.Unlock()
+			
+			if exists {
+				fmt.Println("Error: Service already exists.")
+				continue
+			}
+			
+			passwordBytes, err := readHiddenInput("Enter password for " + service + ": ")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				continue
+			}
+			
+			mu.Lock()
+			vault[service] = passwordBytes
+			err = saveVault(vault, sessionKey, params, vaultPath)
+			mu.Unlock()
+
+			if err != nil {
+				fmt.Printf("Save error: %v\n", err)
+			} else {
+				fmt.Println("Success: Password saved.")
+			}
+
+		case "get":
+			if len(args) < 2 {
+				fmt.Println("Usage: get <service>")
+				continue
+			}
+			service := args[1]
+			
+			mu.Lock()
+			pwdBytes, exists := vault[service]
+			if exists {
+				fmt.Printf("%s: %s\n", service, string(pwdBytes))
+				fmt.Print("   [Press ENTER to hide password]")
+				scanner.Scan()
+				fmt.Print("\r\033[A\033[2K\033[A\033[2K")
+			} else {
+				fmt.Println("Error: Service not found.")
+			}
+			mu.Unlock()
+
+		case "mod":
+			if len(args) < 2 {
+				fmt.Println("Usage: mod <service>")
+				continue
+			}
+			service := args[1]
+			
+			mu.Lock()
+			oldBytes, exists := vault[service]
+			mu.Unlock()
+
+			if exists {
+				passwordBytes, err := readHiddenInput("Enter new password for " + service + ": ")
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					continue
+				}
+				
+				mu.Lock()
+				vault[service] = passwordBytes
+				wipe(oldBytes)
+				err = saveVault(vault, sessionKey, params, vaultPath)
+				mu.Unlock()
+
+				if err != nil {
+					fmt.Printf("Save error: %v\n", err)
+				} else {
+					fmt.Println("Success: Password updated.")
+				}
+			} else {
+				fmt.Println("Error: Service not found.")
+			}
+
+		case "del":
+			if len(args) < 2 {
+				fmt.Println("Usage: del <service>")
+				continue
+			}
+			service := args[1]
+			
+			var err error
+			mu.Lock()
+			pwdBytes, exists := vault[service]
+			if exists {
+				wipe(pwdBytes)
+				delete(vault, service)
+				err = saveVault(vault, sessionKey, params, vaultPath)
+			} else {
+				fmt.Println("Error: Service not found.")
+			}
+			mu.Unlock()
+
+			if exists && err != nil {
+				fmt.Printf("Save error: %v\n", err)
+			} else if exists {
+				fmt.Println("Success: Password deleted.")
+			}
+
+		case "exit":
+			mu.Lock() 
+			wipe(sessionKey)
+			wipeVault(vault)
+			mu.Unlock()
+			fmt.Println("Vault locked. Goodbye.")
+			return
+
+		default:
+			fmt.Println("Unknown command. Type 'help'.")
+		}
+	}
+}
+
 func main() {
+	vaultPath, err := getVaultPath()
+	if err != nil {
+		fmt.Printf("Error resolving vault path: %v\n", err)
+		os.Exit(1)
+	}
+
 	var params CryptoParams
-	var err error
 	var masterPassword []byte
 	scanner := bufio.NewScanner(os.Stdin)
 
-	if _, err = os.Stat(vaultFile); os.IsNotExist(err) {
+	if _, err = os.Stat(vaultPath); os.IsNotExist(err) {
 		fmt.Println("========================================================================")
-		fmt.Println("WARNING:")
-		fmt.Println("The password is NEVER saved to disk or OS keychains.")
-		fmt.Println("If you lose the password, your data is GONE FOREVER.")
-		fmt.Println("You CANNOT reset, recover, or change the master password.")
+		fmt.Println("⚠️  CRITICAL WARNING: ZERO-KNOWLEDGE CRYPTO VAULT")
+		fmt.Println("- CRYPTOGRAPHY: Argon2id key derivation + AES-256-GCM hardware encryption.")
+		fmt.Println("- MEMORY SAFETY: Master password is wiped from RAM instantly after boot.")
+		fmt.Println("- STORAGE SAFETY: The password is NEVER saved to disk or OS keychains.")
+		fmt.Println("- IRREVERSIBLE: If you lose the password, your data is GONE FOREVER.")
+		fmt.Println("- PERMANENT: You CANNOT reset, recover, or change the master password.")
 		fmt.Println("========================================================================")
 		fmt.Println()
 
@@ -398,7 +578,7 @@ func main() {
 		}
 		fmt.Println("[+] Master Password configured successfully.")
 	} else {
-		params, err = readCryptoParams()
+		params, err = readCryptoParams(vaultPath)
 		if err != nil {
 			fmt.Printf("Error reading database configuration: %v\n", err)
 			os.Exit(1)
@@ -415,7 +595,7 @@ func main() {
 	wipe(masterPassword) 
 	defer wipe(sessionKey)
 
-	vault, err := loadVault(sessionKey, params)
+	vault, err := loadVault(sessionKey, params, vaultPath)
 	if err != nil {
 		fmt.Printf("Access Denied: %v\n", err)
 		os.Exit(1)
@@ -433,142 +613,5 @@ func main() {
 		os.Exit(0)
 	}()
 
-	fmt.Println("Vault unlocked. Type 'help' for commands.")
-
-	for {
-		fmt.Print("chpwd> ")
-		if !scanner.Scan() {
-			break
-		}
-
-		line := scanner.Text()
-		args := strings.Fields(line)
-		if len(args) == 0 {
-			continue
-		}
-
-		switch args[0] {
-		case "help":
-			printHelp()
-
-		case "add":
-			if len(args) < 2 {
-				fmt.Println("Usage: add <service>")
-				continue
-			}
-			service := args[1] 
-			
-			mu.Lock()
-			_, exists := vault[service]
-			mu.Unlock()
-			
-			if exists {
-				fmt.Println("Error: Service already exists.")
-				continue
-			}
-			
-			passwordBytes, err := readHiddenInput("Enter password for " + service + ": ")
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-				continue
-			}
-			
-			mu.Lock()
-			vault[service] = passwordBytes
-			err = saveVault(vault, sessionKey, params)
-			mu.Unlock()
-
-			if err != nil {
-				fmt.Printf("Save error: %v\n", err)
-			} else {
-				fmt.Println("Success: Password saved.")
-			}
-
-		case "get":
-			if len(args) < 2 {
-				fmt.Println("Usage: get <service>")
-				continue
-			}
-			service := args[1]
-			
-			mu.Lock()
-			pwdBytes, exists := vault[service]
-			if exists {
-				fmt.Printf("%s: %s\n", service, string(pwdBytes))
-				fmt.Print("   [Press ENTER to hide password]")
-				scanner.Scan()
-				fmt.Print("\r\033[A\033[2K\033[A\033[2K")
-			} else {
-				fmt.Println("Error: Service not found.")
-			}
-			mu.Unlock()
-
-		case "mod":
-			if len(args) < 2 {
-				fmt.Println("Usage: mod <service>")
-				continue
-			}
-			service := args[1]
-			
-			mu.Lock()
-			_, exists := vault[service]
-			mu.Unlock()
-
-			if exists {
-				passwordBytes, err := readHiddenInput("Enter new password for " + service + ": ")
-				if err != nil {
-					fmt.Printf("Error: %v\n", err)
-					continue
-				}
-				
-				mu.Lock()
-				vault[service] = passwordBytes
-				err = saveVault(vault, sessionKey, params)
-				mu.Unlock()
-
-				if err != nil {
-					fmt.Printf("Save error: %v\n", err)
-				} else {
-					fmt.Println("Success: Password updated.")
-				}
-			} else {
-				fmt.Println("Error: Service not found.")
-			}
-
-		case "del":
-			if len(args) < 2 {
-				fmt.Println("Usage: del <service>")
-				continue
-			}
-			service := args[1]
-			
-			mu.Lock()
-			pwdBytes, exists := vault[service]
-			if exists {
-				wipe(pwdBytes)
-				delete(vault, service)
-				err = saveVault(vault, sessionKey, params)
-			} else {
-				fmt.Println("Error: Service not found.")
-			}
-			mu.Unlock()
-
-			if exists && err != nil {
-				fmt.Printf("Save error: %v\n", err)
-			} else if exists {
-				fmt.Println("Success: Password deleted.")
-			}
-
-		case "exit":
-			mu.Lock() 
-			wipe(sessionKey)
-			wipeVault(vault)
-			mu.Unlock()
-			fmt.Println("Vault locked. Goodbye.")
-			return
-
-		default:
-			fmt.Println("Unknown command. Type 'help'.")
-		}
-	}
+	runREPL(vault, sessionKey, params, vaultPath, scanner)
 }

@@ -1,3 +1,7 @@
+# chpwd
+
+A minimal and highly secure CLI password manager. 
+
 ## WARNING:
 This is a Zero-Knowledge system. There is no recovery key and no "Forgot Password" button. If you lose your master key, your data is gone forever.
 
@@ -9,15 +13,11 @@ Please note that **the database file (`vault.db`) is physically created only aft
 
 If you exit the application immediately after configuring the Master Password without adding any entries, **your settings will not be saved**, and the next launch will trigger the setup wizard and disclaimer again.
 
-# chpwd
-
-A minimal and highly secure CLI password manager. 
-
 ## Features
 * **Strong Crypto:** Uses authenticated encryption (**AES-256-GCM**) for data and **Argon2id** for memory-hard master password key derivation.
 * **Tamper Proof:** Hardens the file structure by embedding crypto parameters into the encrypted payload to block downgrade attacks.
 * **Memory Security:** Explicitly wipes master keys, session keys, and sensitive memory buffers (`runtime.KeepAlive`) immediately after use or upon emergency exit (`Ctrl+C`).
-* **Shoulder-Surfing Protection:** Retreived passwords are shown temporarily and completely wiped from the terminal screen and scrollback history using ANSI escape codes as soon as you press `ENTER`.
+* **Shoulder-Surfing Protection:** Retreived passwords are shown temporarily and completely wiped from the terminal screen using ANSI escape codes as soon as you press `ENTER`.
 * **Zero Dependencies:** Pure Go standard library (plus `x/crypto` and `x/term`). No heavy clipboard utilities or OS keychain wrappers required.
 
 ## Installation

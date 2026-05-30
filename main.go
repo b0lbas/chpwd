@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,23 +24,29 @@ import (
 const vaultFile = "vault.db"
 
 const (
-	argonMemory     = 64 * 1024
-	argonIterations = 3
-	argonThreads    = 2
-	keyLength       = 32
-	saltLength      = 16
+	magicBytes  = "CHPD"
+	fileVersion = 1
+	keyLength   = 32
+	saltLength  = 16
+	maxMemoryMB = 4096
 )
+
+type CryptoParams struct {
+	Memory     uint32
+	Iterations uint32
+	Threads    uint8
+	Salt       []byte
+}
 
 type Vault map[string][]byte
 
 var mu sync.Mutex
 
-// wipe — гарантированно очищает память, игнорируя попытки компилятора оптимизировать цикл
 func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-	runtime.KeepAlive(b) // Запрещаем компилятору вырезать этот цикл (Dead Store Elimination)
+	runtime.KeepAlive(b)
 }
 
 func wipeVault(vault Vault) {
@@ -48,7 +55,6 @@ func wipeVault(vault Vault) {
 	}
 }
 
-// readHiddenInput — универсальный скрытый ввод, работающий на всех ОС через os.Stdin.Fd()
 func readHiddenInput(prompt string) ([]byte, error) {
 	fmt.Print(prompt)
 	byteInput, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -59,11 +65,97 @@ func readHiddenInput(prompt string) ([]byte, error) {
 	return byteInput, nil
 }
 
-func deriveKey(password, salt []byte) []byte {
-	return argon2.IDKey(password, salt, argonIterations, argonMemory, argonThreads, keyLength)
+func readParam(scanner *bufio.Scanner, prompt string, defaultVal uint32, minVal uint32, maxVal uint32) uint32 {
+	fmt.Printf("%s [%d]: ", prompt, defaultVal)
+	if !scanner.Scan() {
+		return defaultVal
+	}
+	text := strings.TrimSpace(scanner.Text())
+	if text == "" {
+		return defaultVal
+	}
+	val, err := strconv.ParseUint(text, 10, 32)
+	if err != nil {
+		fmt.Printf("Invalid input, using default: %d\n", defaultVal)
+		return defaultVal
+	}
+	
+	ret := uint32(val)
+	if ret < minVal {
+		fmt.Printf("Value below minimum, adjusted to: %d\n", minVal)
+		return minVal
+	}
+	if ret > maxVal {
+		fmt.Printf("Value exceeds maximum, adjusted to: %d\n", maxVal)
+		return maxVal
+	}
+	return ret
 }
 
-// Бинарный формат кодирования (ноль строк в куче)
+func initCryptoParams(scanner *bufio.Scanner) (CryptoParams, error) {
+	fmt.Println("--- Argon2id Hardware Tuning ---")
+	fmt.Println("Press ENTER to accept the default value.")
+	fmt.Println()
+	
+	memMB := readParam(scanner, "Allocated memory in MB (Min: 8, Max: 4096, Recommended: 256)", 256, 8, maxMemoryMB)
+	iterations := readParam(scanner, "Iterations (Min: 1, Max: 1000, Recommended: 4)", 4, 1, 1000)
+	threads := readParam(scanner, "Parallel threads (Min: 1, Max: 64, Recommended: 4)", 4, 1, 64)
+
+	salt := make([]byte, saltLength)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return CryptoParams{}, err
+	}
+
+	return CryptoParams{
+		Memory:     memMB * 1024,
+		Iterations: iterations,
+		Threads:    uint8(threads),
+		Salt:       salt,
+	}, nil
+}
+
+func readCryptoParams() (CryptoParams, error) {
+	file, err := os.Open(vaultFile)
+	if err != nil {
+		return CryptoParams{}, err
+	}
+	defer file.Close()
+
+	header := make([]byte, 30)
+	_, err = io.ReadFull(file, header)
+	if err != nil {
+		return CryptoParams{}, fmt.Errorf("failed to read database header: %v", err)
+	}
+
+	if string(header[:4]) != magicBytes {
+		return CryptoParams{}, fmt.Errorf("invalid file format (missing CHPD signature)")
+	}
+
+	if header[4] != fileVersion {
+		return CryptoParams{}, fmt.Errorf("unsupported file structure version: %d", header[4])
+	}
+
+	mem := binary.BigEndian.Uint32(header[5:9])
+	iter := binary.BigEndian.Uint32(header[9:13])
+	threads := header[13]
+	salt := header[14:30]
+
+	if mem > maxMemoryMB*1024 {
+		return CryptoParams{}, fmt.Errorf("SECURITY: File requests %d MB RAM. Limit exceeded (max %d MB)", mem/1024, maxMemoryMB)
+	}
+
+	return CryptoParams{
+		Memory:     mem,
+		Iterations: iter,
+		Threads:    threads,
+		Salt:       salt,
+	}, nil
+}
+
+func deriveKey(password []byte, params CryptoParams) []byte {
+	return argon2.IDKey(password, params.Salt, params.Iterations, params.Memory, params.Threads, keyLength)
+}
+
 func encodeVault(v Vault) []byte {
 	var buf bytes.Buffer
 	_ = binary.Write(&buf, binary.BigEndian, uint32(len(v)))
@@ -112,15 +204,7 @@ func decodeVault(data []byte) (Vault, error) {
 	return vault, nil
 }
 
-func encrypt(plaintext []byte, password []byte) ([]byte, error) {
-	salt := make([]byte, saltLength)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, err
-	}
-
-	key := deriveKey(password, salt)
-	defer wipe(key)
-
+func encrypt(plaintext []byte, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -137,23 +221,16 @@ func encrypt(plaintext []byte, password []byte) ([]byte, error) {
 	}
 
 	ciphertext := aesGCM.Seal(nil, nonce, plaintext, nil)
-	encryptedData := append(salt, nonce...)
-	encryptedData = append(encryptedData, ciphertext...)
-
-	return encryptedData, nil
+	return append(nonce, ciphertext...), nil
 }
 
-func decrypt(encryptedData []byte, password []byte) ([]byte, error) {
-	if len(encryptedData) < saltLength+12 {
-		return nil, fmt.Errorf("invalid database file")
+func decrypt(encryptedPayload []byte, key []byte) ([]byte, error) {
+	if len(encryptedPayload) < 12 {
+		return nil, fmt.Errorf("invalid encrypted payload size")
 	}
 
-	salt := encryptedData[:saltLength]
-	nonce := encryptedData[saltLength : saltLength+12]
-	ciphertext := encryptedData[saltLength+12:]
-
-	key := deriveKey(password, salt)
-	defer wipe(key)
+	nonce := encryptedPayload[:12]
+	ciphertext := encryptedPayload[12:]
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -168,33 +245,74 @@ func decrypt(encryptedData []byte, password []byte) ([]byte, error) {
 	return aesGCM.Open(nil, nonce, ciphertext, nil)
 }
 
-func loadVault(password []byte) (Vault, error) {
+func loadVault(sessionKey []byte, currentParams CryptoParams) (Vault, error) {
 	if _, err := os.Stat(vaultFile); os.IsNotExist(err) {
 		return make(Vault), nil
 	}
 
-	encryptedData, err := os.ReadFile(vaultFile)
+	fileData, err := os.ReadFile(vaultFile)
 	if err != nil {
 		return nil, err
 	}
 
-	decryptedData, err := decrypt(encryptedData, password)
+	if len(fileData) < 30+12 {
+		return nil, fmt.Errorf("database file is corrupted or truncated")
+	}
+
+	encryptedPayload := fileData[30:]
+	decryptedData, err := decrypt(encryptedPayload, sessionKey)
 	if err != nil {
 		return nil, err
 	}
 
-	return decodeVault(decryptedData)
+	if len(decryptedData) < 9 {
+		return nil, fmt.Errorf("decrypted validation payload is truncated")
+	}
+
+	origMemory := binary.BigEndian.Uint32(decryptedData[0:4])
+	origIterations := binary.BigEndian.Uint32(decryptedData[4:8])
+	origThreads := decryptedData[8]
+
+	if origMemory != currentParams.Memory || origIterations != currentParams.Iterations || origThreads != currentParams.Threads {
+		return nil, fmt.Errorf("CRITICAL SECURITY ALERT: Database header tampering detected! Original parameters do not match")
+	}
+
+	return decodeVault(decryptedData[9:])
 }
 
-func saveVault(vault Vault, password []byte) error {
-	plaintext := encodeVault(vault)
-	encryptedData, err := encrypt(plaintext, password)
+func saveVault(vault Vault, sessionKey []byte, params CryptoParams) error {
+	vaultPlaintext := encodeVault(vault)
+
+	validationBuf := make([]byte, 9)
+	binary.BigEndian.PutUint32(validationBuf[0:4], params.Memory)
+	binary.BigEndian.PutUint32(validationBuf[4:8], params.Iterations)
+	validationBuf[8] = params.Threads
+
+	finalPlaintext := append(validationBuf, vaultPlaintext...)
+
+	encryptedPayload, err := encrypt(finalPlaintext, sessionKey)
 	if err != nil {
 		return err
 	}
 
+	var buf bytes.Buffer
+	buf.WriteString(magicBytes)
+	buf.WriteByte(fileVersion)
+	
+	memBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(memBuf, params.Memory)
+	buf.Write(memBuf)
+
+	iterBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(iterBuf, params.Iterations)
+	buf.Write(iterBuf)
+
+	buf.WriteByte(params.Threads)
+	buf.Write(params.Salt)
+	buf.Write(encryptedPayload)
+
 	tmpFile := vaultFile + ".tmp"
-	if err := os.WriteFile(tmpFile, encryptedData, 0600); err != nil {
+	if err := os.WriteFile(tmpFile, buf.Bytes(), 0600); err != nil {
 		return err
 	}
 
@@ -216,16 +334,83 @@ func printHelp() {
 }
 
 func main() {
-	masterPassword, err := readHiddenInput("Enter Master Password: ")
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	defer wipe(masterPassword) 
+	var params CryptoParams
+	var err error
+	var masterPassword []byte
+	scanner := bufio.NewScanner(os.Stdin)
 
-	vault, err := loadVault(masterPassword)
+	if _, err = os.Stat(vaultFile); os.IsNotExist(err) {
+		fmt.Println("========================================================================")
+		fmt.Println("⚠️  CRITICAL WARNING: ZERO-KNOWLEDGE CRYPTO VAULT")
+		fmt.Println("- CRYPTOGRAPHY: Argon2id key derivation + AES-256-GCM hardware encryption.")
+		fmt.Println("- MEMORY SAFETY: Master password is wiped from RAM instantly after boot.")
+		fmt.Println("- STORAGE SAFETY: The password is NEVER saved to disk or OS keychains.")
+		fmt.Println("- IRREVERSIBLE: If you lose the password, your data is GONE FOREVER.")
+		fmt.Println("- PERMANENT: You CANNOT reset, recover, or change the master password.")
+		fmt.Println("========================================================================")
+		fmt.Println()
+
+		for {
+			fmt.Print("Type 'I UNDERSTAND' to confirm and proceed: ")
+			if !scanner.Scan() {
+				os.Exit(1)
+			}
+			if strings.TrimSpace(scanner.Text()) == "I UNDERSTAND" {
+				break
+			}
+			fmt.Println("[-] Confirmation failed. You must agree to the terms.")
+		}
+		fmt.Println()
+
+		params, err = initCryptoParams(scanner)
+		if err != nil {
+			fmt.Printf("Initialization error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println()
+
+		for {
+			p1, err := readHiddenInput("Create New Master Password: ")
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			p2, err := readHiddenInput("Confirm New Master Password: ")
+			if err != nil {
+				wipe(p1)
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if bytes.Equal(p1, p2) {
+				masterPassword = p1
+				wipe(p2)
+				break
+			}
+			fmt.Println("[-] Passwords do not match. Try again.")
+			wipe(p1)
+			wipe(p2)
+		}
+		fmt.Println("[+] Master Password configured successfully.")
+	} else {
+		params, err = readCryptoParams()
+		if err != nil {
+			fmt.Printf("Error reading database configuration: %v\n", err)
+			os.Exit(1)
+		}
+
+		masterPassword, err = readHiddenInput("Enter Master Password: ")
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	sessionKey := deriveKey(masterPassword, params)
+	wipe(masterPassword) 
+	defer wipe(sessionKey)
+
+	vault, err := loadVault(sessionKey, params)
 	if err != nil {
-		wipe(masterPassword)
 		fmt.Printf("Access Denied: %v\n", err)
 		os.Exit(1)
 	}
@@ -236,14 +421,13 @@ func main() {
 	go func() {
 		<-sigChan
 		mu.Lock() 
-		wipe(masterPassword)
+		wipe(sessionKey)
 		wipeVault(vault)
 		fmt.Println("\n[!] Emergency exit. Memory wiped. Vault locked.")
 		os.Exit(0)
 	}()
 
 	fmt.Println("Vault unlocked. Type 'help' for commands.")
-	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
 		fmt.Print("chpwd> ")
@@ -285,7 +469,7 @@ func main() {
 			
 			mu.Lock()
 			vault[service] = passwordBytes
-			err = saveVault(vault, masterPassword)
+			err = saveVault(vault, sessionKey, params)
 			mu.Unlock()
 
 			if err != nil {
@@ -330,7 +514,7 @@ func main() {
 				
 				mu.Lock()
 				vault[service] = passwordBytes
-				err = saveVault(vault, masterPassword)
+				err = saveVault(vault, sessionKey, params)
 				mu.Unlock()
 
 				if err != nil {
@@ -354,7 +538,7 @@ func main() {
 			if exists {
 				wipe(pwdBytes)
 				delete(vault, service)
-				err = saveVault(vault, masterPassword)
+				err = saveVault(vault, sessionKey, params)
 			} else {
 				fmt.Println("Error: Service not found.")
 			}
@@ -368,7 +552,7 @@ func main() {
 
 		case "exit":
 			mu.Lock() 
-			wipe(masterPassword)
+			wipe(sessionKey)
 			wipeVault(vault)
 			mu.Unlock()
 			fmt.Println("Vault locked. Goodbye.")

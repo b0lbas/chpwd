@@ -1,4 +1,5 @@
-WARNING: This is a pure Zero-Knowledge system. There is no back-door, no recovery key, and no "Forgot Password" button. If you lose your master key, your data is gone forever.
+## WARNING:
+This is a Zero-Knowledge system. There is no recovery key and no "Forgot Password" button. If you lose your master key, your data is gone forever.
 
 ## Important Note on First Launch
 

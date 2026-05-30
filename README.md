@@ -14,9 +14,11 @@ If you exit the application immediately after configuring the Master Password wi
 A minimal and highly secure CLI password manager for Linux. 
 
 ## Features
-* **Strong Crypto:** Uses AES-256-GCM for encryption and Argon2id for master password key derivation.
-* **Memory Security:** Explicitly wipes master keys and sensitive data from RAM immediately after use.
-* **Interactive UI:** REPL shell environment with hidden password input to prevent terminal history leaks.
+* **Strong Crypto:** Uses authenticated encryption (**AES-256-GCM**) for data and **Argon2id** for memory-hard master password key derivation.
+* **Tamper Proof:** Hardens the file structure by embedding crypto parameters into the encrypted payload to block downgrade attacks.
+* **Memory Security:** Explicitly wipes master keys, session keys, and sensitive memory buffers (`runtime.KeepAlive`) immediately after use or upon emergency exit (`Ctrl+C`).
+* **Shoulder-Surfing Protection:** Retreived passwords are shown temporarily and completely wiped from the terminal screen and scrollback history using ANSI escape codes as soon as you press `ENTER`.
+* **Zero Dependencies:** Pure Go standard library (plus `x/crypto` and `x/term`). No heavy clipboard utilities or OS keychain wrappers required.
 
 ## Installation
 
